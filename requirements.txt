@@ -1,3 +1,10 @@
 streamlit>=1.32
 pandas>=2.0
 plotly>=5.18
+numpy
+typing_extensions
+networkx
+streamlit-plotly-events
+sqlite-utils
+python-dotenv
+reportlab
