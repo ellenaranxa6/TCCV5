@@ -1,3 +1,4 @@
+# app.py
 import streamlit as st
 import plotly.graph_objects as go
 import sqlite3
@@ -10,7 +11,7 @@ import pandas as pd
 # CONFIG
 # =========================================================
 st.set_page_config(page_title="Manobras - IEEE-123 Bus", layout="wide")
-st.title("Manobras - IEEE-123 Bus (Modo 2)")
+st.title("Manobras - IEEE-123 Bus")
 
 BASE_DIR = Path(__file__).parent
 DB_PATH = BASE_DIR / "toposwitch_modo2.db"
@@ -45,15 +46,6 @@ if not st.session_state["auth_ok"]:
 # =========================================================
 def get_connection() -> sqlite3.Connection:
     return sqlite3.connect(DB_PATH)
-
-@st.cache_data(show_spinner=False)
-def listar_tabelas() -> List[str]:
-    conn = get_connection()
-    cur = conn.cursor()
-    cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
-    out = [r[0] for r in cur.fetchall()]
-    conn.close()
-    return out
 
 @st.cache_data(show_spinner=False)
 def has_table(name: str) -> bool:
@@ -122,9 +114,6 @@ def listar_spans() -> pd.DataFrame:
 
 @st.cache_data(show_spinner=False)
 def carregar_opcoes_span(span_id: str) -> pd.DataFrame:
-    """
-    Retorna opções (até 3) já com joins de métricas.
-    """
     conn = get_connection()
     q = """
     SELECT
@@ -147,16 +136,8 @@ def carregar_opcoes_span(span_id: str) -> pd.DataFrame:
         ls.dp_kw,
         ls.dp_pct,
 
-        vs.n_v_viol,
-        vs.worst_v_bus,
-        vs.worst_vmin_pu,
-        vs.worst_vmax_pu,
+        vs.n_v_viol
 
-        cs.has_new_violation,
-        cs.has_worse_violation,
-        cs.worst_elem,
-        cs.worst_ratio_base,
-        cs.worst_ratio_after
     FROM maneuver_options mo
     LEFT JOIN option_load_impact li
         ON li.span_id = mo.span_id AND li.option_rank = mo.option_rank
@@ -164,8 +145,6 @@ def carregar_opcoes_span(span_id: str) -> pd.DataFrame:
         ON ls.span_id = mo.span_id AND ls.option_rank = mo.option_rank
     LEFT JOIN option_voltage_summary vs
         ON vs.span_id = mo.span_id AND vs.option_rank = mo.option_rank
-    LEFT JOIN option_current_summary cs
-        ON cs.span_id = mo.span_id AND cs.option_rank = mo.option_rank
     WHERE mo.span_id = ?
     ORDER BY mo.option_rank
     LIMIT 3
@@ -196,7 +175,7 @@ def carregar_steps(span_id: str, option_rank: int) -> pd.DataFrame:
 def topo_por_line_dict(topo: List[Dict]) -> Dict[str, Dict]:
     return {norm_elem_token(el["line"]): el for el in topo}
 
-def construir_mapa_base(coords: Dict[str, Tuple[float, float]], topo: List[Dict]) -> go.Figure:
+def construir_mapa_base(coords: Dict[str, Tuple[float, float]], topo: List[Dict], show_line_labels: bool = True) -> go.Figure:
     edge_x, edge_y = [], []
     for el in topo:
         u, v = el["from_bus"], el["to_bus"]
@@ -214,10 +193,10 @@ def construir_mapa_base(coords: Dict[str, Tuple[float, float]], topo: List[Dict]
         name="Linhas"
     ))
 
+    # barras
     node_x = [coords[b][0] for b in coords]
     node_y = [coords[b][1] for b in coords]
     node_text = list(coords.keys())
-
     fig.add_trace(go.Scatter(
         x=node_x, y=node_y,
         mode="markers+text",
@@ -227,6 +206,28 @@ def construir_mapa_base(coords: Dict[str, Tuple[float, float]], topo: List[Dict]
         name="Barras",
         hovertemplate="Barra %{text}<extra></extra>",
     ))
+
+    # labels das linhas/vãos
+    if show_line_labels:
+        topo_d = topo_por_line_dict(topo)
+        lx, ly, lt = [], [], []
+        for key, el in topo_d.items():
+            u, v = el["from_bus"], el["to_bus"]
+            if u in coords and v in coords:
+                x0, y0 = coords[u]
+                x1, y1 = coords[v]
+                lx.append((x0 + x1) / 2.0)
+                ly.append((y0 + y1) / 2.0)
+                lt.append(str(el["line"]))
+        fig.add_trace(go.Scatter(
+            x=lx, y=ly,
+            mode="text",
+            text=lt,
+            textposition="middle center",
+            textfont=dict(size=8, color="#555555"),
+            hoverinfo="skip",
+            showlegend=False
+        ))
 
     fig.update_layout(
         height=650,
@@ -256,7 +257,7 @@ def add_line_trace(fig: go.Figure, coords, topo_d, ln_token: str, color: str, la
         ))
 
 def plotar_mapa(coords, topo, span_line_token: str, nf_list: List[str], na: str, nf_block: str, buses_off: List[str]) -> go.Figure:
-    fig = construir_mapa_base(coords, topo)
+    fig = construir_mapa_base(coords, topo, show_line_labels=True)
     topo_d = topo_por_line_dict(topo)
 
     # destaca o vão selecionado (preto)
@@ -270,16 +271,20 @@ def plotar_mapa(coords, topo, span_line_token: str, nf_list: List[str], na: str,
     off_x = [coords[b][0] for b in buses_off_set if b in coords]
     off_y = [coords[b][1] for b in buses_off_set if b in coords]
     if off_x:
-        fig.add_trace(go.Scatter(x=off_x, y=off_y, mode="markers",
-                                 marker=dict(size=8, color="red"),
-                                 name="Barras desligadas", hoverinfo="skip"))
+        fig.add_trace(go.Scatter(
+            x=off_x, y=off_y, mode="markers",
+            marker=dict(size=8, color="red"),
+            name="Barras desligadas", hoverinfo="skip"
+        ))
 
     on_x = [coords[b][0] for b in buses_on if b in coords]
     on_y = [coords[b][1] for b in buses_on if b in coords]
     if on_x:
-        fig.add_trace(go.Scatter(x=on_x, y=on_y, mode="markers",
-                                 marker=dict(size=7, color="green"),
-                                 name="Barras energizadas", hoverinfo="skip"))
+        fig.add_trace(go.Scatter(
+            x=on_x, y=on_y, mode="markers",
+            marker=dict(size=7, color="green"),
+            name="Barras energizadas", hoverinfo="skip"
+        ))
 
     # NFs/NA/NFblock
     for nf in (nf_list or []):
@@ -292,48 +297,40 @@ def plotar_mapa(coords, topo, span_line_token: str, nf_list: List[str], na: str,
     return fig
 
 # =========================================================
-# UI
+# VALIDAR DB
 # =========================================================
-st.sidebar.header("📂 Status do banco (Modo 2)")
-
 if not DB_PATH.exists():
-    st.sidebar.error(f"Banco `{DB_PATH.name}` não encontrado na pasta do app.")
+    st.error(f"Banco `{DB_PATH.name}` não encontrado na pasta do app.")
     st.stop()
 
-tabelas = listar_tabelas()
-st.sidebar.write("Banco:", f"`{DB_PATH.name}`")
-st.sidebar.write("Tabelas:", ", ".join(tabelas))
-
-# valida se tem mapa
 if not has_table("coords") or not has_table("topology"):
-    st.error(
-        "Seu banco novo ainda não tem as tabelas **coords** e **topology**.\n\n"
-        "➡️ Rode o script `enrich_db_map.py` para preencher coords/topology e habilitar o mapa."
-    )
+    st.error("Banco não possui `coords` e/ou `topology` (mapa indisponível).")
     st.stop()
 
 coords = carregar_coords()
 topo = carregar_topologia()
 if not coords or not topo:
-    st.error("`coords` ou `topology` está vazio. Rode novamente o enrich_db_map.py (e confira BusCoords.dat).")
+    st.error("`coords` ou `topology` está vazio.")
     st.stop()
 
+# =========================================================
+# UI
+# =========================================================
 nome_operador = st.text_input("Nome do operador responsável", value="Ellen")
 st.info(f"Usuário: **{nome_operador}**")
 
 st.markdown("---")
 st.subheader("Rede IEEE-123 Bus Operação")
-st.plotly_chart(construir_mapa_base(coords, topo), use_container_width=True)
+st.plotly_chart(construir_mapa_base(coords, topo, show_line_labels=True), use_container_width=True)
 
 st.markdown("---")
-st.subheader("Operação por Vão (vão simples)")
+st.subheader("Operação por Vão")
 
 spans_df = listar_spans()
 if spans_df.empty:
     st.error("Tabela `spans` está vazia.")
     st.stop()
 
-# Busca + select filtrado
 busca = st.text_input("Buscar vão (ex.: L35)", value="")
 spans_f = spans_df.copy()
 if busca.strip():
@@ -344,12 +341,11 @@ if not span_opts:
     st.warning("Nenhum vão encontrado com esse filtro.")
     st.stop()
 
-span_id = st.selectbox("Selecione o vão (span_id):", options=span_opts, index=0)
+span_id = st.selectbox("Selecione o vão", options=span_opts, index=0)
 
-# carrega 3 opções
 opt_df = carregar_opcoes_span(span_id)
 if opt_df.empty:
-    st.error("Não há opções (maneuver_options) para esse vão.")
+    st.error("Não há opções para esse vão.")
     st.stop()
 
 def status_ok_atencao(row) -> tuple[str, List[str]]:
@@ -357,12 +353,6 @@ def status_ok_atencao(row) -> tuple[str, List[str]]:
     n_v_viol = int(row.get("n_v_viol") or 0)
     if n_v_viol > 0:
         reasons.append("Violação de tensão")
-
-    if int(row.get("has_new_violation") or 0) == 1:
-        reasons.append("Nova violação de corrente")
-
-    if int(row.get("has_worse_violation") or 0) == 1:
-        reasons.append("Piora de violação de corrente")
 
     dp_kw = row.get("dp_kw")
     try:
@@ -375,7 +365,7 @@ def status_ok_atencao(row) -> tuple[str, List[str]]:
         return "⚠️ Atenção", reasons
     return "✅ OK", reasons
 
-# monta tabela resumo
+# tabela resumo (somente colunas solicitadas)
 rows = []
 for _, r in opt_df.iterrows():
     nf_list = parse_json_list(r.get("nf_isol_json"))
@@ -393,23 +383,22 @@ for _, r in opt_df.iterrows():
         "NF_contenção": nf_block if nf_block else "•",
         "Manobras": int(r.get("n_manobras") or 0),
 
-        "kW_base": float(r.get("kw_off_base") or 0.0),
-        "kW_final": float(r.get("kw_off_after") or 0.0),
-        "kW_rest": float(r.get("rest_kw") or 0.0),
-        "Barras_off": int(r.get("n_buses_off") or 0),
+        "Carga Inicial Desligada": float(r.get("kw_off_base") or 0.0),
+        "Carga Final Desligada": float(r.get("kw_off_after") or 0.0),
+        "Carga Reestabelecida": float(r.get("rest_kw") or 0.0),
 
-        "Perdas_base_kW": float(r.get("p_loss_base_kw") or 0.0),
-        "Perdas_final_kW": float(r.get("p_loss_after_kw") or 0.0),
-        "Δperdas_kW": float(r.get("dp_kw") or 0.0),
+        "Barras Afetadas": int(r.get("n_buses_off") or 0),
 
-        "V_viol": int(r.get("n_v_viol") or 0),
-        "I_nova": int(r.get("has_new_violation") or 0),
-        "I_piora": int(r.get("has_worse_violation") or 0),
+        "Perdas Antes": float(r.get("p_loss_base_kw") or 0.0),
+        "Perdas Após": float(r.get("p_loss_after_kw") or 0.0),
+
+        "Nº de Barras Fora do Limite V 0,95-1,05pu": int(r.get("n_v_viol") or 0),
         "Motivos": "; ".join(reasons) if reasons else "—",
     })
 
 df_show = pd.DataFrame(rows).sort_values("Opção")
-st.markdown("### Opções (máx. 3)")
+
+st.markdown("### Manobras para o Vão Indicado")
 st.dataframe(df_show, use_container_width=True)
 
 # escolha da opção
@@ -422,14 +411,12 @@ st.session_state["opt_rank"] = st.selectbox(
     index=df_show["Opção"].tolist().index(st.session_state["opt_rank"])
 )
 
-# pega linha selecionada
 sel = opt_df[opt_df["option_rank"] == st.session_state["opt_rank"]].iloc[0]
 
 nf_list = parse_json_list(sel.get("nf_isol_json"))
 na = norm_elem_token(sel.get("na_elem"))
 nf_block = norm_elem_token(sel.get("nf_block_elem"))
 
-# span_line_token
 span_line_elem = str(spans_df[spans_df["span_id"] == span_id]["line_elem"].iloc[0] or "")
 span_line_token = norm_elem_token(span_line_elem)
 
@@ -452,35 +439,31 @@ with tab1:
         st.write(f"- **Motivos:** {', '.join(reasons)}")
 
     st.write(
-        f"- **NF isolação:** `{nf_list if nf_list else '-'}`\n"
-        f"- **NA:** `{na if na else '-'}`\n"
-        f"- **NF contenção:** `{nf_block if nf_block else '-'}`\n"
-        f"- **Manobras:** `{int(sel.get('n_manobras') or 0)}`\n"
-        f"- **Carga base (kW):** `{float(sel.get('kw_off_base') or 0.0):.2f}`\n"
-        f"- **Carga final (kW):** `{float(sel.get('kw_off_after') or 0.0):.2f}`\n"
-        f"- **Carga restabelecida (kW):** `{float(sel.get('rest_kw') or 0.0):.2f}`\n"
-        f"- **Barras desligadas:** `{int(sel.get('n_buses_off') or 0)}`\n"
-        f"- **Perdas base (kW):** `{float(sel.get('p_loss_base_kw') or 0.0):.2f}`\n"
-        f"- **Perdas final (kW):** `{float(sel.get('p_loss_after_kw') or 0.0):.2f}`\n"
-        f"- **Δperdas (kW):** `{float(sel.get('dp_kw') or 0.0):.2f}`\n"
+        f"- **NF isolação:** `{nf_list if nf_list else '-'}`  \n"
+        f"- **NA:** `{na if na else '-'}`  \n"
+        f"- **NF contenção:** `{nf_block if nf_block else '-'}`  \n"
+        f"- **Manobras:** `{int(sel.get('n_manobras') or 0)}`  \n"
+        f"- **Carga Inicial Desligada (kW):** `{float(sel.get('kw_off_base') or 0.0):.2f}`  \n"
+        f"- **Carga Final Desligada (kW):** `{float(sel.get('kw_off_after') or 0.0):.2f}`  \n"
+        f"- **Carga Reestabelecida (kW):** `{float(sel.get('rest_kw') or 0.0):.2f}`  \n"
+        f"- **Barras Afetadas:** `{int(sel.get('n_buses_off') or 0)}`  \n"
+        f"- **Perdas Antes (kW):** `{float(sel.get('p_loss_base_kw') or 0.0):.2f}`  \n"
+        f"- **Perdas Após (kW):** `{float(sel.get('p_loss_after_kw') or 0.0):.2f}`  \n"
+        f"- **Nº de Barras Fora do Limite V 0,95-1,05pu:** `{int(sel.get('n_v_viol') or 0)}`"
     )
 
     st.markdown("#### Passo a passo")
     if steps_df.empty:
         st.info("Sem passos cadastrados em `maneuver_steps` para esta opção.")
     else:
-        st.dataframe(steps_df, use_container_width=True)
-
-    st.markdown("#### Restrições (resumo)")
-    st.write(
-        f"- **Violação de tensão (n):** `{int(sel.get('n_v_viol') or 0)}`\n"
-        f"- **Pior barra (tensão):** `{sel.get('worst_v_bus')}` | "
-        f"vmin `{sel.get('worst_vmin_pu')}` | vmax `{sel.get('worst_vmax_pu')}`\n"
-        f"- **Nova violação de corrente:** `{int(sel.get('has_new_violation') or 0)}`\n"
-        f"- **Piora de violação de corrente:** `{int(sel.get('has_worse_violation') or 0)}`\n"
-        f"- **Pior elemento (corrente):** `{sel.get('worst_elem')}` | "
-        f"ratio base `{sel.get('worst_ratio_base')}` | ratio após `{sel.get('worst_ratio_after')}`\n"
-    )
+        steps_show = steps_df.copy()
+        steps_show["op"] = steps_show["op"].astype(str).str.lower().map({"open": "Abrir", "close": "Fechar"}).fillna(steps_show["op"])
+        steps_show = steps_show.rename(columns={
+            "step_order": "Ordem de Execução",
+            "op": "Ação",
+            "element": "Chave Manobrada"
+        })
+        st.dataframe(steps_show, use_container_width=True)
 
 with tab2:
     st.subheader("🗺️ Mapa da manobra")
@@ -491,8 +474,3 @@ with tab3:
     st.subheader("Barras desligadas")
     st.write(buses_off if buses_off else [])
 
-# aba “rejeitadas” (vazia por enquanto)
-st.markdown("---")
-st.subheader("Manobras rejeitadas")
-st.caption("No momento, a tabela `rejected_maneuvers` está vazia (só sequências OK).")
-st.info("Quando você quiser, eu adiciono aqui a consulta + filtros por motivo, mas por agora não é necessário.")
