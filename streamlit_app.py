@@ -18,7 +18,7 @@ BASE_DIR = Path(__file__).parent
 DB_PATH = BASE_DIR / "toposwitch_modo2.db"
 
 # Pasta dos PNGs (perfil de tensão) — opcional
-VOLTAGE_IMG_DIR = BASE_DIR / "TCCV5" / "Tensao"
+VOLTAGE_IMG_DIR = BASE_DIR / "Tensao"
 
 # =========================================================
 # LOGIN
@@ -566,8 +566,8 @@ with aba_v:
 # ABA 2 — Visualizar Manobra (Banco) — por SEQUÊNCIA (deduplicada)
 # =========================================================
 with aba_m:
-    st.subheader("Visualizar Manobra (Banco)")
-    st.caption("Selecione uma SEQUÊNCIA (deduplicada) e visualize a rede. Se a sequência existir em vários vãos, escolha qual vão usar para o mapa/métricas.")
+    st.subheader("Visualizar Manobra")
+    st.caption("Selecione uma Sequência e visualize a rede")
 
     all_df = listar_todas_opcoes_com_metricas()
     if all_df.empty:
@@ -677,7 +677,7 @@ with aba_m:
     st.markdown("#### Barras desligadas")
     st.write(buses_off if buses_off else [])
 
-    st.markdown("#### Perfil de tensão (PNG)")
+    st.markdown("#### Perfil de tensão")
     slug = build_maneuver_slug(nf_list, na, nf_block)
     img_path = voltage_png_path_for_slug(slug) if slug else None
     if slug and img_path and img_path.exists():
