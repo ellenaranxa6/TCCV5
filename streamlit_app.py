@@ -653,8 +653,6 @@ with aba_m:
     st.markdown("#### Resumo (para o vão selecionado)")
     st.write(
         f"- **Sequência:** `{seq_row['seq_slug']}`  \n"
-        f"- **Span:** `{span_id_m}`  \n"
-        f"- **Opção (rank no BD):** `{opt_rank_m}`  \n"
         f"- **Status:** {status}  \n"
         f"- **NF isolação:** `{nf_list if nf_list else '-'}`  \n"
         f"- **NA:** `{na if na else '-'}`  \n"
