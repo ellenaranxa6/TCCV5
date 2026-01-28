@@ -19,7 +19,7 @@ BASE_DIR = Path(__file__).parent
 DB_PATH = BASE_DIR / "toposwitch_modo2.db"
 
 # ✅ pasta dos PNGs (como você pediu)
-VOLTAGE_IMG_DIR = BASE_DIR / "Tensao"
+VOLTAGE_IMG_DIR = BASE_DIR / "TCCV5" / "Tensao"
 
 # =========================================================
 # LOGIN
@@ -556,4 +556,3 @@ with tab4:
         else:
             st.warning(f"PNG não encontrado: {img_path}")
             st.caption("Verifique se o arquivo existe e se o nome bate exatamente com a manobra.")
-
