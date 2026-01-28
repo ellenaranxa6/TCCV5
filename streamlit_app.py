@@ -18,7 +18,7 @@ BASE_DIR = Path(__file__).parent
 DB_PATH = BASE_DIR / "toposwitch_modo2.db"
 
 # Pasta dos PNGs (perfil de tensão) — opcional
-VOLTAGE_IMG_DIR = BASE_DIR / "TCCV5" / "Tensao"
+VOLTAGE_IMG_DIR = BASE_DIR / "Tensao"
 
 # =========================================================
 # LOGIN
