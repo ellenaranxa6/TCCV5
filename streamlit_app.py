@@ -419,7 +419,7 @@ st.plotly_chart(construir_mapa_base(coords, topo, show_line_labels=True), use_co
 # =========================================================
 # ABAS PRINCIPAIS
 # =========================================================
-aba_v, aba_m = st.tabs(["Operação por Vão", "Visualizar Manobra (Banco)"])
+aba_v, aba_m = st.tabs(["Operação por Vão", "Visualizar Manobra"])
 
 # =========================================================
 # ABA 1 — Operação por Vão
@@ -554,13 +554,13 @@ with aba_v:
         st.write(buses_off if buses_off else [])
 
     with tab4:
-        st.subheader("Perfil de tensão (PNG)")
+        st.subheader("Perfil de tensão")
         slug = build_maneuver_slug(nf_list, na, nf_block)
         img_path = voltage_png_path_for_slug(slug) if slug else None
         if slug and img_path and img_path.exists():
             st.image(str(img_path), caption=f"perfil_tensao_{slug}.png", use_container_width=True)
         else:
-            st.caption("Sem PNG correspondente (ou arquivo não encontrado).")
+            st.caption("Sem gráfico correspondente (ou arquivo não encontrado).")
 
 # =========================================================
 # ABA 2 — Visualizar Manobra (Banco) — por SEQUÊNCIA (deduplicada)
