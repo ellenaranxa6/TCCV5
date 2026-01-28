@@ -6,6 +6,8 @@ from pathlib import Path
 from typing import Dict, Tuple, List, Optional
 import json
 import pandas as pd
+import re
+import base64
 
 # =========================================================
 # CONFIG
@@ -15,6 +17,9 @@ st.title("Manobras - IEEE-123 Bus")
 
 BASE_DIR = Path(__file__).parent
 DB_PATH = BASE_DIR / "toposwitch_modo2.db"
+
+# ✅ pasta dos PNGs (como você pediu)
+VOLTAGE_IMG_DIR = BASE_DIR / "TCCV5" / "Tensao"
 
 # =========================================================
 # LOGIN
@@ -45,7 +50,7 @@ if not st.session_state["auth_ok"]:
 # DB helpers
 # =========================================================
 def get_connection() -> sqlite3.Connection:
-    return sqlite3.connect(DB_PATH)
+    return sqlite3.connect(DB_PATH, check_same_thread=False)
 
 @st.cache_data(show_spinner=False)
 def has_table(name: str) -> bool:
@@ -101,6 +106,12 @@ def parse_json_list(s: Optional[str]) -> List[str]:
     except Exception:
         pass
     return []
+
+def safe_json_list(s: Optional[str]) -> List:
+    try:
+        return json.loads(s or "[]")
+    except Exception:
+        return []
 
 @st.cache_data(show_spinner=False)
 def listar_spans() -> pd.DataFrame:
@@ -170,6 +181,68 @@ def carregar_steps(span_id: str, option_rank: int) -> pd.DataFrame:
     return df
 
 # =========================================================
+# STATUS
+# =========================================================
+def status_ok_atencao(row) -> tuple[str, List[str]]:
+    reasons: List[str] = []
+    n_v_viol = int(row.get("n_v_viol") or 0)
+    if n_v_viol > 0:
+        reasons.append("Violação de tensão")
+
+    dp_kw = row.get("dp_kw")
+    try:
+        if dp_kw is not None and float(dp_kw) > 0:
+            reasons.append("Δperdas > 0")
+    except Exception:
+        pass
+
+    if reasons:
+        return "⚠️ Atenção", reasons
+    return "✅ OK", reasons
+
+# =========================================================
+# TENSÃO (PNG por MANOBRA) - LINK SEMPRE CLICÁVEL (DATA URI)
+# =========================================================
+def token_to_label(tok: str) -> str:
+    t = norm_elem_token(tok)
+    if not t:
+        return ""
+    m_sw = re.match(r"^sw(\d+)$", t, flags=re.I)
+    if m_sw:
+        return f"SW{int(m_sw.group(1))}"
+    m_l = re.match(r"^l(\d+)$", t, flags=re.I)
+    if m_l:
+        return f"L{int(m_l.group(1))}"
+    return t.upper()
+
+def build_maneuver_slug(nf_list: List[str], na: str, nf_block: str) -> str:
+    parts = []
+    if nf_list:
+        parts.append(token_to_label(nf_list[0]))
+    if na:
+        parts.append(token_to_label(na))
+    if nf_block:
+        parts.append(token_to_label(nf_block))
+    parts = [p for p in parts if p]
+    return "-".join(parts)
+
+def voltage_png_path_for_slug(slug: str) -> Path:
+    return VOLTAGE_IMG_DIR / f"perfil_tensao_{slug}.png"
+
+@st.cache_data(show_spinner=False)
+def png_to_data_uri(p: str) -> str:
+    """
+    ✅ Retorna um link 'data:image/png;base64,...'
+    Isso deixa o link SEMPRE clicável no dataframe (sem depender do GitHub).
+    """
+    path = Path(p)
+    if not path.exists():
+        return ""
+    b = path.read_bytes()
+    b64 = base64.b64encode(b).decode("utf-8")
+    return f"data:image/png;base64,{b64}"
+
+# =========================================================
 # MAPA
 # =========================================================
 def topo_por_line_dict(topo: List[Dict]) -> Dict[str, Dict]:
@@ -193,7 +266,6 @@ def construir_mapa_base(coords: Dict[str, Tuple[float, float]], topo: List[Dict]
         name="Linhas"
     ))
 
-    # barras
     node_x = [coords[b][0] for b in coords]
     node_y = [coords[b][1] for b in coords]
     node_text = list(coords.keys())
@@ -207,11 +279,10 @@ def construir_mapa_base(coords: Dict[str, Tuple[float, float]], topo: List[Dict]
         hovertemplate="Barra %{text}<extra></extra>",
     ))
 
-    # labels das linhas/vãos
     if show_line_labels:
         topo_d = topo_por_line_dict(topo)
         lx, ly, lt = [], [], []
-        for key, el in topo_d.items():
+        for _, el in topo_d.items():
             u, v = el["from_bus"], el["to_bus"]
             if u in coords and v in coords:
                 x0, y0 = coords[u]
@@ -260,10 +331,8 @@ def plotar_mapa(coords, topo, span_line_token: str, nf_list: List[str], na: str,
     fig = construir_mapa_base(coords, topo, show_line_labels=True)
     topo_d = topo_por_line_dict(topo)
 
-    # destaca o vão selecionado (preto)
     add_line_trace(fig, coords, topo_d, span_line_token, "black", "Vão selecionado", 5, None)
 
-    # barras desligadas (vermelho) e energizadas (verde)
     all_buses = set(coords.keys())
     buses_off_set = set([str(b).strip() for b in (buses_off or [])])
     buses_on = all_buses - buses_off_set
@@ -286,10 +355,8 @@ def plotar_mapa(coords, topo, span_line_token: str, nf_list: List[str], na: str,
             name="Barras energizadas", hoverinfo="skip"
         ))
 
-    # NFs/NA/NFblock
     for nf in (nf_list or []):
         add_line_trace(fig, coords, topo_d, nf, "red", "NF isolação (abrir)", 6, "dash")
-
     add_line_trace(fig, coords, topo_d, na, "cyan", "NA (fechar)", 7, None)
     add_line_trace(fig, coords, topo_d, nf_block, "purple", "NF contenção (abrir)", 7, None)
 
@@ -334,7 +401,7 @@ if spans_df.empty:
 busca = st.text_input("Buscar vão (ex.: L35)", value="")
 spans_f = spans_df.copy()
 if busca.strip():
-    spans_f = spans_f[spans_f["span_id"].str.contains(busca.strip(), case=False, na=False)]
+    spans_f = spans_f[spans_f["span_id"].astype(str).str.contains(busca.strip(), case=False, na=False)]
 
 span_opts = spans_f["span_id"].tolist()
 if not span_opts:
@@ -348,24 +415,7 @@ if opt_df.empty:
     st.error("Não há opções para esse vão.")
     st.stop()
 
-def status_ok_atencao(row) -> tuple[str, List[str]]:
-    reasons = []
-    n_v_viol = int(row.get("n_v_viol") or 0)
-    if n_v_viol > 0:
-        reasons.append("Violação de tensão")
-
-    dp_kw = row.get("dp_kw")
-    try:
-        if dp_kw is not None and float(dp_kw) > 0:
-            reasons.append("Δperdas > 0")
-    except Exception:
-        pass
-
-    if reasons:
-        return "⚠️ Atenção", reasons
-    return "✅ OK", reasons
-
-# tabela resumo (somente colunas solicitadas)
+# ===== tabela resumo (com LINK SEMPRE clicável) =====
 rows = []
 for _, r in opt_df.iterrows():
     nf_list = parse_json_list(r.get("nf_isol_json"))
@@ -373,6 +423,12 @@ for _, r in opt_df.iterrows():
     nf_block = norm_elem_token(r.get("nf_block_elem"))
 
     status, reasons = status_ok_atencao(r)
+
+    slug = build_maneuver_slug(nf_list, na, nf_block)
+    img_path = voltage_png_path_for_slug(slug)
+
+    # ✅ data-uri (clica e abre)
+    data_uri = png_to_data_uri(str(img_path)) if slug else ""
 
     rows.append({
         "Opção": int(r["option_rank"]),
@@ -394,12 +450,28 @@ for _, r in opt_df.iterrows():
 
         "Nº de Barras Fora do Limite V 0,95-1,05pu": int(r.get("n_v_viol") or 0),
         "Motivos": "; ".join(reasons) if reasons else "—",
+
+        # ✅ Link sempre clicável
+        "Gráfico de Tensão": data_uri if data_uri else "data:," ,  # placeholder clicável mesmo se faltar
+        "_slug": slug,
+        "_img_path": str(img_path),
     })
 
 df_show = pd.DataFrame(rows).sort_values("Opção")
 
 st.markdown("### Manobras para o Vão Indicado")
-st.dataframe(df_show, use_container_width=True)
+
+st.dataframe(
+    df_show.drop(columns=["_slug", "_img_path"]),
+    use_container_width=True,
+    column_config={
+        "Gráfico de Tensão": st.column_config.LinkColumn(
+            "Gráfico de Tensão",
+            help="Abrir PNG do perfil de tensão",
+            display_text="Abrir",
+        )
+    }
+)
 
 # escolha da opção
 if "opt_rank" not in st.session_state:
@@ -412,6 +484,7 @@ st.session_state["opt_rank"] = st.selectbox(
 )
 
 sel = opt_df[opt_df["option_rank"] == st.session_state["opt_rank"]].iloc[0]
+row_sel = df_show[df_show["Opção"] == st.session_state["opt_rank"]].iloc[0]
 
 nf_list = parse_json_list(sel.get("nf_isol_json"))
 na = norm_elem_token(sel.get("na_elem"))
@@ -420,17 +493,12 @@ nf_block = norm_elem_token(sel.get("nf_block_elem"))
 span_line_elem = str(spans_df[spans_df["span_id"] == span_id]["line_elem"].iloc[0] or "")
 span_line_token = norm_elem_token(span_line_elem)
 
-# buses_off list
-buses_off = []
-try:
-    buses_off = json.loads(sel.get("buses_off_json") or "[]")
-except Exception:
-    buses_off = []
+buses_off = safe_json_list(sel.get("buses_off_json"))
 
 steps_df = carregar_steps(span_id, int(sel["option_rank"]))
 status, reasons = status_ok_atencao(sel)
 
-tab1, tab2, tab3 = st.tabs(["Detalhamento", "Mapa", "Barras desligadas"])
+tab1, tab2, tab3, tab4 = st.tabs(["Detalhamento", "Mapa", "Barras desligadas", "Tensão (PNG)"])
 
 with tab1:
     st.subheader(f"Detalhamento — {span_id} | Opção {int(sel['option_rank'])}")
@@ -458,6 +526,7 @@ with tab1:
     else:
         steps_show = steps_df.copy()
         steps_show["op"] = steps_show["op"].astype(str).str.lower().map({"open": "Abrir", "close": "Fechar"}).fillna(steps_show["op"])
+        steps_show["element"] = steps_show["element"].astype(str).apply(norm_elem_token)
         steps_show = steps_show.rename(columns={
             "step_order": "Ordem de Execução",
             "op": "Ação",
@@ -473,4 +542,18 @@ with tab2:
 with tab3:
     st.subheader("Barras desligadas")
     st.write(buses_off if buses_off else [])
+
+with tab4:
+    st.subheader("Perfil de tensão (PNG)")
+    img_path = Path(row_sel.get("_img_path") or "")
+    slug = str(row_sel.get("_slug") or "").strip()
+
+    if not slug:
+        st.info("Não foi possível montar o nome da manobra para buscar o PNG.")
+    else:
+        if img_path.exists():
+            st.image(str(img_path), caption=f"perfil_tensao_{slug}.png", use_container_width=True)
+        else:
+            st.warning(f"PNG não encontrado: {img_path}")
+            st.caption("Verifique se o arquivo existe e se o nome bate exatamente com a manobra.")
 
