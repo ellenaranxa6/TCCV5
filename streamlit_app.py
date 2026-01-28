@@ -18,7 +18,7 @@ BASE_DIR = Path(__file__).parent
 DB_PATH = BASE_DIR / "toposwitch_modo2.db"
 
 # Pasta dos PNGs (perfil de tensão) — opcional
-VOLTAGE_IMG_DIR = BASE_DIR / "Tensao"
+VOLTAGE_IMG_DIR = BASE_DIR / "TCCV5" / "Tensao"
 
 # =========================================================
 # LOGIN
@@ -178,10 +178,10 @@ def carregar_steps(span_id: str, option_rank: int) -> pd.DataFrame:
     return df
 
 @st.cache_data(show_spinner=False)
-def listar_todas_maneuvers() -> pd.DataFrame:
+def listar_todas_opcoes_com_metricas() -> pd.DataFrame:
     """
-    Todas as manobras existentes no BD (todas as opções).
-    Usado na aba "Visualizar Manobra (Banco)".
+    Retorna todas as opções (por span/opção) com métricas e line_elem.
+    Usado para deduplicar por SEQUÊNCIA na aba "Visualizar Manobra (Banco)".
     """
     conn = get_connection()
     q = """
@@ -200,12 +200,17 @@ def listar_todas_maneuvers() -> pd.DataFrame:
         li.n_buses_off,
         li.buses_off_json,
 
+        ls.p_loss_base_kw,
+        ls.p_loss_after_kw,
+
         vs.n_v_viol,
 
         sp.line_elem
     FROM maneuver_options mo
     LEFT JOIN option_load_impact li
         ON li.span_id = mo.span_id AND li.option_rank = mo.option_rank
+    LEFT JOIN option_losses ls
+        ON ls.span_id = mo.span_id AND ls.option_rank = mo.option_rank
     LEFT JOIN option_voltage_summary vs
         ON vs.span_id = mo.span_id AND vs.option_rank = mo.option_rank
     LEFT JOIN spans sp
@@ -558,43 +563,81 @@ with aba_v:
             st.caption("Sem PNG correspondente (ou arquivo não encontrado).")
 
 # =========================================================
-# ABA 2 — Visualizar Manobra (Banco)  ✅ AQUI É O QUE VOCÊ PEDIU
+# ABA 2 — Visualizar Manobra (Banco) — por SEQUÊNCIA (deduplicada)
 # =========================================================
 with aba_m:
     st.subheader("Visualizar Manobra (Banco)")
-    st.caption("Selecione uma manobra já cadastrada no banco e visualize o gráfico da rede.")
+    st.caption("Selecione uma SEQUÊNCIA (deduplicada) e visualize a rede. Se a sequência existir em vários vãos, escolha qual vão usar para o mapa/métricas.")
 
-    all_df = listar_todas_maneuvers()
+    all_df = listar_todas_opcoes_com_metricas()
     if all_df.empty:
         st.error("Não encontrei manobras em `maneuver_options`.")
         st.stop()
 
-    # cria um label amigável para seleção
-    labels = []
-    for _, r in all_df.iterrows():
-        nf_list = parse_json_list(r.get("nf_isol_json"))
+    # ---- construir chave da sequência: (NF_list, NA, NF_block)
+    def seq_key_from_row(r: pd.Series) -> tuple:
+        nf_list = tuple(parse_json_list(r.get("nf_isol_json")))
         na = norm_elem_token(r.get("na_elem"))
         nf_block = norm_elem_token(r.get("nf_block_elem"))
-        slug = build_maneuver_slug(nf_list, na, nf_block)
-        if not slug:
-            slug = f"{str(r.get('span_id'))}-OP{int(r.get('option_rank') or 0)}"
-        labels.append(f"{slug}  |  {str(r.get('span_id'))}  |  Opção {int(r.get('option_rank') or 0)}")
+        return (nf_list, na, nf_block)
+
+    def seq_slug_from_key(key: tuple) -> str:
+        nf_list, na, nf_block = key
+        return build_maneuver_slug(list(nf_list), na, nf_block) or "BASE"
 
     all_df = all_df.copy()
-    all_df["__label"] = labels
+    all_df["__seq_key"] = all_df.apply(seq_key_from_row, axis=1)
+    all_df["__seq_slug"] = all_df["__seq_key"].apply(seq_slug_from_key)
 
-    filtro = st.text_input("Buscar manobra (ex.: SW1, L108, SW4)", value="", key="busca_manobra")
-    df_f = all_df
+    # ---- dedup: uma linha por sequência + agregados
+    agg = (
+        all_df.groupby("__seq_key", dropna=False)
+        .agg(
+            seq_slug=("__seq_slug", "first"),
+            ocorrencias=("span_id", "count"),
+            spans=("span_id", lambda x: sorted(list(set([str(s) for s in x])))),
+        )
+        .reset_index()
+    )
+
+    # label amigável de sequência (não repete por span)
+    agg["__label"] = agg.apply(
+        lambda r: f"{r['seq_slug']}  |  ocorrências: {int(r['ocorrencias'])}",
+        axis=1
+    )
+
+    filtro = st.text_input("Buscar sequência (ex.: SW1, L108, SW4)", value="", key="busca_seq")
+    agg_f = agg
     if filtro.strip():
         f = filtro.strip().lower()
-        df_f = df_f[df_f["__label"].str.lower().str.contains(f, na=False)]
+        agg_f = agg_f[agg_f["__label"].str.lower().str.contains(f, na=False)]
 
-    if df_f.empty:
-        st.warning("Nenhuma manobra encontrada com esse filtro.")
+    if agg_f.empty:
+        st.warning("Nenhuma sequência encontrada com esse filtro.")
         st.stop()
 
-    label_sel = st.selectbox("Selecione a manobra", options=df_f["__label"].tolist(), index=0, key="select_manobra")
-    row = df_f[df_f["__label"] == label_sel].iloc[0]
+    label_sel = st.selectbox("Selecione a sequência", options=agg_f["__label"].tolist(), index=0, key="select_seq")
+
+    seq_row = agg_f[agg_f["__label"] == label_sel].iloc[0]
+    seq_key = seq_row["__seq_key"]
+    spans_list = seq_row["spans"]
+
+    # mostra lista de vãos onde essa sequência aparece
+    with st.expander("Vãos onde essa sequência aparece"):
+        st.write(spans_list)
+
+    # escolher UM vão para visualizar mapa/métricas (porque buses_off pode variar por vão)
+    span_pick = st.selectbox("Visualizar resultados para o vão:", options=spans_list, index=0, key="select_seq_span")
+
+    # pega a "melhor" opção daquele vão para essa sequência
+    df_occ = all_df[(all_df["__seq_key"] == seq_key) & (all_df["span_id"].astype(str) == str(span_pick))].copy()
+    if df_occ.empty:
+        st.error("Não encontrei ocorrência dessa sequência para o vão selecionado.")
+        st.stop()
+
+    # se houver mais de uma option_rank com a mesma seq (raro), pegue a menor option_rank
+    df_occ["option_rank"] = df_occ["option_rank"].astype(int)
+    row = df_occ.sort_values("option_rank").iloc[0]
 
     span_id_m = str(row.get("span_id"))
     opt_rank_m = int(row.get("option_rank") or 0)
@@ -607,10 +650,11 @@ with aba_m:
 
     status, reasons = status_ok_atencao(row)
 
-    st.markdown("#### Resumo")
+    st.markdown("#### Resumo (para o vão selecionado)")
     st.write(
+        f"- **Sequência:** `{seq_row['seq_slug']}`  \n"
         f"- **Span:** `{span_id_m}`  \n"
-        f"- **Opção:** `{opt_rank_m}`  \n"
+        f"- **Opção (rank no BD):** `{opt_rank_m}`  \n"
         f"- **Status:** {status}  \n"
         f"- **NF isolação:** `{nf_list if nf_list else '-'}`  \n"
         f"- **NA:** `{na if na else '-'}`  \n"
@@ -619,12 +663,14 @@ with aba_m:
         f"- **Carga Inicial Desligada (kW):** `{float(row.get('kw_off_base') or 0.0):.2f}`  \n"
         f"- **Carga Final Desligada (kW):** `{float(row.get('kw_off_after') or 0.0):.2f}`  \n"
         f"- **Carga Reestabelecida (kW):** `{float(row.get('rest_kw') or 0.0):.2f}`  \n"
+        f"- **Perdas Antes (kW):** `{float(row.get('p_loss_base_kw') or 0.0):.2f}`  \n"
+        f"- **Perdas Após (kW):** `{float(row.get('p_loss_after_kw') or 0.0):.2f}`  \n"
         f"- **Nº de Barras Fora do Limite V 0,95-1,05pu:** `{int(row.get('n_v_viol') or 0)}`"
     )
     if reasons:
         st.write(f"- **Motivos:** {', '.join(reasons)}")
 
-    st.markdown("#### 🗺️ Gráfico da rede (manobra selecionada)")
+    st.markdown("#### 🗺️ Gráfico da rede (sequência selecionada)")
     fig = plotar_mapa(coords, topo, span_line_token, nf_list, na, nf_block, buses_off)
     st.plotly_chart(fig, use_container_width=True)
 
