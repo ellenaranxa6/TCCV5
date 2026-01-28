@@ -7,7 +7,6 @@ from typing import Dict, Tuple, List, Optional
 import json
 import pandas as pd
 import re
-import base64
 
 # =========================================================
 # CONFIG
@@ -18,8 +17,8 @@ st.title("Manobras - IEEE-123 Bus")
 BASE_DIR = Path(__file__).parent
 DB_PATH = BASE_DIR / "toposwitch_modo2.db"
 
-# ✅ pasta dos PNGs (como você pediu)
-VOLTAGE_IMG_DIR = BASE_DIR / "Tensao"
+# Pasta dos PNGs (perfil de tensão) — opcional
+VOLTAGE_IMG_DIR = BASE_DIR / "TCCV5" / "Tensao"
 
 # =========================================================
 # LOGIN
@@ -144,8 +143,6 @@ def carregar_opcoes_span(span_id: str) -> pd.DataFrame:
 
         ls.p_loss_base_kw,
         ls.p_loss_after_kw,
-        ls.dp_kw,
-        ls.dp_pct,
 
         vs.n_v_viol
 
@@ -180,6 +177,45 @@ def carregar_steps(span_id: str, option_rank: int) -> pd.DataFrame:
     conn.close()
     return df
 
+@st.cache_data(show_spinner=False)
+def listar_todas_maneuvers() -> pd.DataFrame:
+    """
+    Todas as manobras existentes no BD (todas as opções).
+    Usado na aba "Visualizar Manobra (Banco)".
+    """
+    conn = get_connection()
+    q = """
+    SELECT
+        mo.span_id,
+        mo.option_rank,
+        mo.tipo,
+        mo.nf_isol_json,
+        mo.na_elem,
+        mo.nf_block_elem,
+        mo.n_manobras,
+
+        li.kw_off_base,
+        li.kw_off_after,
+        li.rest_kw,
+        li.n_buses_off,
+        li.buses_off_json,
+
+        vs.n_v_viol,
+
+        sp.line_elem
+    FROM maneuver_options mo
+    LEFT JOIN option_load_impact li
+        ON li.span_id = mo.span_id AND li.option_rank = mo.option_rank
+    LEFT JOIN option_voltage_summary vs
+        ON vs.span_id = mo.span_id AND vs.option_rank = mo.option_rank
+    LEFT JOIN spans sp
+        ON sp.span_id = mo.span_id
+    ORDER BY mo.span_id, mo.option_rank
+    """
+    df = pd.read_sql_query(q, conn)
+    conn.close()
+    return df
+
 # =========================================================
 # STATUS
 # =========================================================
@@ -188,20 +224,12 @@ def status_ok_atencao(row) -> tuple[str, List[str]]:
     n_v_viol = int(row.get("n_v_viol") or 0)
     if n_v_viol > 0:
         reasons.append("Violação de tensão")
-
-    dp_kw = row.get("dp_kw")
-    try:
-        if dp_kw is not None and float(dp_kw) > 0:
-            reasons.append("Δperdas > 0")
-    except Exception:
-        pass
-
     if reasons:
         return "⚠️ Atenção", reasons
     return "✅ OK", reasons
 
 # =========================================================
-# TENSÃO (PNG por MANOBRA) - LINK SEMPRE CLICÁVEL (DATA URI)
+# TENSÃO (PNG) — opcional
 # =========================================================
 def token_to_label(tok: str) -> str:
     t = norm_elem_token(tok)
@@ -228,19 +256,6 @@ def build_maneuver_slug(nf_list: List[str], na: str, nf_block: str) -> str:
 
 def voltage_png_path_for_slug(slug: str) -> Path:
     return VOLTAGE_IMG_DIR / f"perfil_tensao_{slug}.png"
-
-@st.cache_data(show_spinner=False)
-def png_to_data_uri(p: str) -> str:
-    """
-    ✅ Retorna um link 'data:image/png;base64,...'
-    Isso deixa o link SEMPRE clicável no dataframe (sem depender do GitHub).
-    """
-    path = Path(p)
-    if not path.exists():
-        return ""
-    b = path.read_bytes()
-    b64 = base64.b64encode(b).decode("utf-8")
-    return f"data:image/png;base64,{b64}"
 
 # =========================================================
 # MAPA
@@ -331,8 +346,11 @@ def plotar_mapa(coords, topo, span_line_token: str, nf_list: List[str], na: str,
     fig = construir_mapa_base(coords, topo, show_line_labels=True)
     topo_d = topo_por_line_dict(topo)
 
-    add_line_trace(fig, coords, topo_d, span_line_token, "black", "Vão selecionado", 5, None)
+    # vão selecionado (preto) — se existir
+    if span_line_token:
+        add_line_trace(fig, coords, topo_d, span_line_token, "black", "Vão selecionado", 5, None)
 
+    # barras desligadas / energizadas
     all_buses = set(coords.keys())
     buses_off_set = set([str(b).strip() for b in (buses_off or [])])
     buses_on = all_buses - buses_off_set
@@ -355,10 +373,13 @@ def plotar_mapa(coords, topo, span_line_token: str, nf_list: List[str], na: str,
             name="Barras energizadas", hoverinfo="skip"
         ))
 
+    # NFs/NA/NFblock
     for nf in (nf_list or []):
         add_line_trace(fig, coords, topo_d, nf, "red", "NF isolação (abrir)", 6, "dash")
-    add_line_trace(fig, coords, topo_d, na, "cyan", "NA (fechar)", 7, None)
-    add_line_trace(fig, coords, topo_d, nf_block, "purple", "NF contenção (abrir)", 7, None)
+    if na:
+        add_line_trace(fig, coords, topo_d, na, "cyan", "NA (fechar)", 7, None)
+    if nf_block:
+        add_line_trace(fig, coords, topo_d, nf_block, "purple", "NF contenção (abrir)", 7, None)
 
     fig.update_layout(height=650, margin=dict(l=10, r=10, t=30, b=10))
     return fig
@@ -390,169 +411,230 @@ st.markdown("---")
 st.subheader("Rede IEEE-123 Bus Operação")
 st.plotly_chart(construir_mapa_base(coords, topo, show_line_labels=True), use_container_width=True)
 
-st.markdown("---")
-st.subheader("Operação por Vão")
+# =========================================================
+# ABAS PRINCIPAIS
+# =========================================================
+aba_v, aba_m = st.tabs(["Operação por Vão", "Visualizar Manobra (Banco)"])
 
-spans_df = listar_spans()
-if spans_df.empty:
-    st.error("Tabela `spans` está vazia.")
-    st.stop()
+# =========================================================
+# ABA 1 — Operação por Vão
+# =========================================================
+with aba_v:
+    st.subheader("Operação por Vão")
 
-busca = st.text_input("Buscar vão (ex.: L35)", value="")
-spans_f = spans_df.copy()
-if busca.strip():
-    spans_f = spans_f[spans_f["span_id"].astype(str).str.contains(busca.strip(), case=False, na=False)]
+    spans_df = listar_spans()
+    if spans_df.empty:
+        st.error("Tabela `spans` está vazia.")
+        st.stop()
 
-span_opts = spans_f["span_id"].tolist()
-if not span_opts:
-    st.warning("Nenhum vão encontrado com esse filtro.")
-    st.stop()
+    busca = st.text_input("Buscar vão (ex.: L35)", value="", key="busca_span")
+    spans_f = spans_df.copy()
+    if busca.strip():
+        spans_f = spans_f[spans_f["span_id"].astype(str).str.contains(busca.strip(), case=False, na=False)]
 
-span_id = st.selectbox("Selecione o vão", options=span_opts, index=0)
+    span_opts = spans_f["span_id"].tolist()
+    if not span_opts:
+        st.warning("Nenhum vão encontrado com esse filtro.")
+        st.stop()
 
-opt_df = carregar_opcoes_span(span_id)
-if opt_df.empty:
-    st.error("Não há opções para esse vão.")
-    st.stop()
+    span_id = st.selectbox("Selecione o vão", options=span_opts, index=0, key="select_span")
 
-# ===== tabela resumo (com LINK SEMPRE clicável) =====
-rows = []
-for _, r in opt_df.iterrows():
-    nf_list = parse_json_list(r.get("nf_isol_json"))
-    na = norm_elem_token(r.get("na_elem"))
-    nf_block = norm_elem_token(r.get("nf_block_elem"))
+    opt_df = carregar_opcoes_span(span_id)
+    if opt_df.empty:
+        st.error("Não há opções para esse vão.")
+        st.stop()
 
-    status, reasons = status_ok_atencao(r)
+    # ===== TABELA SEM LINK (garantido) =====
+    rows = []
+    for _, r in opt_df.iterrows():
+        nf_list = parse_json_list(r.get("nf_isol_json"))
+        na = norm_elem_token(r.get("na_elem"))
+        nf_block = norm_elem_token(r.get("nf_block_elem"))
 
-    slug = build_maneuver_slug(nf_list, na, nf_block)
-    img_path = voltage_png_path_for_slug(slug)
+        status, reasons = status_ok_atencao(r)
 
-    # ✅ data-uri (clica e abre)
-    data_uri = png_to_data_uri(str(img_path)) if slug else ""
+        rows.append({
+            "Opção": int(r["option_rank"]),
+            "Status": status,
+            "Tipo": str(r.get("tipo") or ""),
+            "NF_isolação": ",".join(nf_list) if nf_list else "•",
+            "NA": na if na else "•",
+            "NF_contenção": nf_block if nf_block else "•",
+            "Manobras": int(r.get("n_manobras") or 0),
 
-    rows.append({
-        "Opção": int(r["option_rank"]),
-        "Status": status,
-        "Tipo": str(r.get("tipo") or ""),
-        "NF_isolação": ",".join(nf_list) if nf_list else "•",
-        "NA": na if na else "•",
-        "NF_contenção": nf_block if nf_block else "•",
-        "Manobras": int(r.get("n_manobras") or 0),
+            "Carga Inicial Desligada": float(r.get("kw_off_base") or 0.0),
+            "Carga Final Desligada": float(r.get("kw_off_after") or 0.0),
+            "Carga Reestabelecida": float(r.get("rest_kw") or 0.0),
 
-        "Carga Inicial Desligada": float(r.get("kw_off_base") or 0.0),
-        "Carga Final Desligada": float(r.get("kw_off_after") or 0.0),
-        "Carga Reestabelecida": float(r.get("rest_kw") or 0.0),
+            "Barras Afetadas": int(r.get("n_buses_off") or 0),
 
-        "Barras Afetadas": int(r.get("n_buses_off") or 0),
+            "Perdas Antes": float(r.get("p_loss_base_kw") or 0.0),
+            "Perdas Após": float(r.get("p_loss_after_kw") or 0.0),
 
-        "Perdas Antes": float(r.get("p_loss_base_kw") or 0.0),
-        "Perdas Após": float(r.get("p_loss_after_kw") or 0.0),
+            "Nº de Barras Fora do Limite V 0,95-1,05pu": int(r.get("n_v_viol") or 0),
+            "Motivos": "; ".join(reasons) if reasons else "—",
+        })
 
-        "Nº de Barras Fora do Limite V 0,95-1,05pu": int(r.get("n_v_viol") or 0),
-        "Motivos": "; ".join(reasons) if reasons else "—",
+    df_show = pd.DataFrame(rows).sort_values("Opção")
 
-        # ✅ Link sempre clicável
-        "Gráfico de Tensão": data_uri if data_uri else "data:," ,  # placeholder clicável mesmo se faltar
-        "_slug": slug,
-        "_img_path": str(img_path),
-    })
+    st.markdown("### Manobras para o Vão Indicado")
+    st.dataframe(df_show, use_container_width=True)
 
-df_show = pd.DataFrame(rows).sort_values("Opção")
+    # escolha da opção
+    if "opt_rank" not in st.session_state:
+        st.session_state["opt_rank"] = int(df_show["Opção"].iloc[0])
 
-st.markdown("### Manobras para o Vão Indicado")
+    st.session_state["opt_rank"] = st.selectbox(
+        "Detalhar opção:",
+        options=df_show["Opção"].tolist(),
+        index=df_show["Opção"].tolist().index(st.session_state["opt_rank"]),
+        key="select_opt_rank"
+    )
 
-st.dataframe(
-    df_show.drop(columns=["_slug", "_img_path"]),
-    use_container_width=True,
-    column_config={
-        "Gráfico de Tensão": st.column_config.LinkColumn(
-            "Gráfico de Tensão",
-            help="Abrir PNG do perfil de tensão",
-            display_text="Abrir",
+    sel = opt_df[opt_df["option_rank"] == st.session_state["opt_rank"]].iloc[0]
+    nf_list = parse_json_list(sel.get("nf_isol_json"))
+    na = norm_elem_token(sel.get("na_elem"))
+    nf_block = norm_elem_token(sel.get("nf_block_elem"))
+
+    span_line_elem = str(spans_df[spans_df["span_id"] == span_id]["line_elem"].iloc[0] or "")
+    span_line_token = norm_elem_token(span_line_elem)
+
+    buses_off = safe_json_list(sel.get("buses_off_json"))
+    steps_df = carregar_steps(span_id, int(sel["option_rank"]))
+    status, reasons = status_ok_atencao(sel)
+
+    tab1, tab2, tab3, tab4 = st.tabs(["Detalhamento", "Mapa", "Barras desligadas", "Tensão (PNG)"])
+
+    with tab1:
+        st.subheader(f"Detalhamento — {span_id} | Opção {int(sel['option_rank'])}")
+        st.write(f"- **Status:** {status}")
+        if reasons:
+            st.write(f"- **Motivos:** {', '.join(reasons)}")
+
+        st.write(
+            f"- **NF isolação:** `{nf_list if nf_list else '-'}`  \n"
+            f"- **NA:** `{na if na else '-'}`  \n"
+            f"- **NF contenção:** `{nf_block if nf_block else '-'}`  \n"
+            f"- **Manobras:** `{int(sel.get('n_manobras') or 0)}`  \n"
+            f"- **Carga Inicial Desligada (kW):** `{float(sel.get('kw_off_base') or 0.0):.2f}`  \n"
+            f"- **Carga Final Desligada (kW):** `{float(sel.get('kw_off_after') or 0.0):.2f}`  \n"
+            f"- **Carga Reestabelecida (kW):** `{float(sel.get('rest_kw') or 0.0):.2f}`  \n"
+            f"- **Barras Afetadas:** `{int(sel.get('n_buses_off') or 0)}`  \n"
+            f"- **Perdas Antes (kW):** `{float(sel.get('p_loss_base_kw') or 0.0):.2f}`  \n"
+            f"- **Perdas Após (kW):** `{float(sel.get('p_loss_after_kw') or 0.0):.2f}`  \n"
+            f"- **Nº de Barras Fora do Limite V 0,95-1,05pu:** `{int(sel.get('n_v_viol') or 0)}`"
         )
-    }
-)
 
-# escolha da opção
-if "opt_rank" not in st.session_state:
-    st.session_state["opt_rank"] = int(df_show["Opção"].iloc[0])
+        st.markdown("#### Passo a passo")
+        if steps_df.empty:
+            st.info("Sem passos cadastrados em `maneuver_steps` para esta opção.")
+        else:
+            steps_show = steps_df.copy()
+            steps_show["op"] = steps_show["op"].astype(str).str.lower().map({"open": "Abrir", "close": "Fechar"}).fillna(steps_show["op"])
+            steps_show["element"] = steps_show["element"].astype(str).apply(norm_elem_token)
+            steps_show = steps_show.rename(columns={
+                "step_order": "Ordem de Execução",
+                "op": "Ação",
+                "element": "Chave Manobrada"
+            })
+            st.dataframe(steps_show, use_container_width=True)
 
-st.session_state["opt_rank"] = st.selectbox(
-    "Detalhar opção:",
-    options=df_show["Opção"].tolist(),
-    index=df_show["Opção"].tolist().index(st.session_state["opt_rank"])
-)
+    with tab2:
+        st.subheader("🗺️ Mapa da manobra")
+        fig = plotar_mapa(coords, topo, span_line_token, nf_list, na, nf_block, buses_off)
+        st.plotly_chart(fig, use_container_width=True)
 
-sel = opt_df[opt_df["option_rank"] == st.session_state["opt_rank"]].iloc[0]
-row_sel = df_show[df_show["Opção"] == st.session_state["opt_rank"]].iloc[0]
+    with tab3:
+        st.subheader("Barras desligadas")
+        st.write(buses_off if buses_off else [])
 
-nf_list = parse_json_list(sel.get("nf_isol_json"))
-na = norm_elem_token(sel.get("na_elem"))
-nf_block = norm_elem_token(sel.get("nf_block_elem"))
+    with tab4:
+        st.subheader("Perfil de tensão (PNG)")
+        slug = build_maneuver_slug(nf_list, na, nf_block)
+        img_path = voltage_png_path_for_slug(slug) if slug else None
+        if slug and img_path and img_path.exists():
+            st.image(str(img_path), caption=f"perfil_tensao_{slug}.png", use_container_width=True)
+        else:
+            st.caption("Sem PNG correspondente (ou arquivo não encontrado).")
 
-span_line_elem = str(spans_df[spans_df["span_id"] == span_id]["line_elem"].iloc[0] or "")
-span_line_token = norm_elem_token(span_line_elem)
+# =========================================================
+# ABA 2 — Visualizar Manobra (Banco)  ✅ AQUI É O QUE VOCÊ PEDIU
+# =========================================================
+with aba_m:
+    st.subheader("Visualizar Manobra (Banco)")
+    st.caption("Selecione uma manobra já cadastrada no banco e visualize o gráfico da rede.")
 
-buses_off = safe_json_list(sel.get("buses_off_json"))
+    all_df = listar_todas_maneuvers()
+    if all_df.empty:
+        st.error("Não encontrei manobras em `maneuver_options`.")
+        st.stop()
 
-steps_df = carregar_steps(span_id, int(sel["option_rank"]))
-status, reasons = status_ok_atencao(sel)
+    # cria um label amigável para seleção
+    labels = []
+    for _, r in all_df.iterrows():
+        nf_list = parse_json_list(r.get("nf_isol_json"))
+        na = norm_elem_token(r.get("na_elem"))
+        nf_block = norm_elem_token(r.get("nf_block_elem"))
+        slug = build_maneuver_slug(nf_list, na, nf_block)
+        if not slug:
+            slug = f"{str(r.get('span_id'))}-OP{int(r.get('option_rank') or 0)}"
+        labels.append(f"{slug}  |  {str(r.get('span_id'))}  |  Opção {int(r.get('option_rank') or 0)}")
 
-tab1, tab2, tab3, tab4 = st.tabs(["Detalhamento", "Mapa", "Barras desligadas", "Tensão (PNG)"])
+    all_df = all_df.copy()
+    all_df["__label"] = labels
 
-with tab1:
-    st.subheader(f"Detalhamento — {span_id} | Opção {int(sel['option_rank'])}")
-    st.write(f"- **Status:** {status}")
-    if reasons:
-        st.write(f"- **Motivos:** {', '.join(reasons)}")
+    filtro = st.text_input("Buscar manobra (ex.: SW1, L108, SW4)", value="", key="busca_manobra")
+    df_f = all_df
+    if filtro.strip():
+        f = filtro.strip().lower()
+        df_f = df_f[df_f["__label"].str.lower().str.contains(f, na=False)]
 
+    if df_f.empty:
+        st.warning("Nenhuma manobra encontrada com esse filtro.")
+        st.stop()
+
+    label_sel = st.selectbox("Selecione a manobra", options=df_f["__label"].tolist(), index=0, key="select_manobra")
+    row = df_f[df_f["__label"] == label_sel].iloc[0]
+
+    span_id_m = str(row.get("span_id"))
+    opt_rank_m = int(row.get("option_rank") or 0)
+
+    nf_list = parse_json_list(row.get("nf_isol_json"))
+    na = norm_elem_token(row.get("na_elem"))
+    nf_block = norm_elem_token(row.get("nf_block_elem"))
+    buses_off = safe_json_list(row.get("buses_off_json"))
+    span_line_token = norm_elem_token(str(row.get("line_elem") or ""))
+
+    status, reasons = status_ok_atencao(row)
+
+    st.markdown("#### Resumo")
     st.write(
+        f"- **Span:** `{span_id_m}`  \n"
+        f"- **Opção:** `{opt_rank_m}`  \n"
+        f"- **Status:** {status}  \n"
         f"- **NF isolação:** `{nf_list if nf_list else '-'}`  \n"
         f"- **NA:** `{na if na else '-'}`  \n"
         f"- **NF contenção:** `{nf_block if nf_block else '-'}`  \n"
-        f"- **Manobras:** `{int(sel.get('n_manobras') or 0)}`  \n"
-        f"- **Carga Inicial Desligada (kW):** `{float(sel.get('kw_off_base') or 0.0):.2f}`  \n"
-        f"- **Carga Final Desligada (kW):** `{float(sel.get('kw_off_after') or 0.0):.2f}`  \n"
-        f"- **Carga Reestabelecida (kW):** `{float(sel.get('rest_kw') or 0.0):.2f}`  \n"
-        f"- **Barras Afetadas:** `{int(sel.get('n_buses_off') or 0)}`  \n"
-        f"- **Perdas Antes (kW):** `{float(sel.get('p_loss_base_kw') or 0.0):.2f}`  \n"
-        f"- **Perdas Após (kW):** `{float(sel.get('p_loss_after_kw') or 0.0):.2f}`  \n"
-        f"- **Nº de Barras Fora do Limite V 0,95-1,05pu:** `{int(sel.get('n_v_viol') or 0)}`"
+        f"- **Barras Afetadas:** `{int(row.get('n_buses_off') or 0)}`  \n"
+        f"- **Carga Inicial Desligada (kW):** `{float(row.get('kw_off_base') or 0.0):.2f}`  \n"
+        f"- **Carga Final Desligada (kW):** `{float(row.get('kw_off_after') or 0.0):.2f}`  \n"
+        f"- **Carga Reestabelecida (kW):** `{float(row.get('rest_kw') or 0.0):.2f}`  \n"
+        f"- **Nº de Barras Fora do Limite V 0,95-1,05pu:** `{int(row.get('n_v_viol') or 0)}`"
     )
+    if reasons:
+        st.write(f"- **Motivos:** {', '.join(reasons)}")
 
-    st.markdown("#### Passo a passo")
-    if steps_df.empty:
-        st.info("Sem passos cadastrados em `maneuver_steps` para esta opção.")
-    else:
-        steps_show = steps_df.copy()
-        steps_show["op"] = steps_show["op"].astype(str).str.lower().map({"open": "Abrir", "close": "Fechar"}).fillna(steps_show["op"])
-        steps_show["element"] = steps_show["element"].astype(str).apply(norm_elem_token)
-        steps_show = steps_show.rename(columns={
-            "step_order": "Ordem de Execução",
-            "op": "Ação",
-            "element": "Chave Manobrada"
-        })
-        st.dataframe(steps_show, use_container_width=True)
-
-with tab2:
-    st.subheader("🗺️ Mapa da manobra")
+    st.markdown("#### 🗺️ Gráfico da rede (manobra selecionada)")
     fig = plotar_mapa(coords, topo, span_line_token, nf_list, na, nf_block, buses_off)
     st.plotly_chart(fig, use_container_width=True)
 
-with tab3:
-    st.subheader("Barras desligadas")
+    st.markdown("#### Barras desligadas")
     st.write(buses_off if buses_off else [])
 
-with tab4:
-    st.subheader("Perfil de tensão (PNG)")
-    img_path = Path(row_sel.get("_img_path") or "")
-    slug = str(row_sel.get("_slug") or "").strip()
-
-    if not slug:
-        st.info("Não foi possível montar o nome da manobra para buscar o PNG.")
+    st.markdown("#### Perfil de tensão (PNG)")
+    slug = build_maneuver_slug(nf_list, na, nf_block)
+    img_path = voltage_png_path_for_slug(slug) if slug else None
+    if slug and img_path and img_path.exists():
+        st.image(str(img_path), caption=f"perfil_tensao_{slug}.png", use_container_width=True)
     else:
-        if img_path.exists():
-            st.image(str(img_path), caption=f"perfil_tensao_{slug}.png", use_container_width=True)
-        else:
-            st.warning(f"PNG não encontrado: {img_path}")
-            st.caption("Verifique se o arquivo existe e se o nome bate exatamente com a manobra.")
+        st.caption("Sem PNG correspondente (ou arquivo não encontrado).")
